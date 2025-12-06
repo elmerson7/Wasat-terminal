@@ -43,6 +43,102 @@ const notifications = [];
 const MAX_NOTIFICATIONS = 10;
 
 /**
+ * Busca chats por nombre o número de teléfono
+ * @param {string} searchTerm - Término de búsqueda
+ * @returns {Promise<Array>} Array de chats que coinciden con la búsqueda (máximo 20)
+ */
+async function searchChats(searchTerm) {
+    try {
+        const allChats = await client.getChats();
+        const searchLower = searchTerm.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        
+        const results = [];
+        
+        for (const chat of allChats) {
+            const chatName = getChatName(chat);
+            const nameNormalized = chatName.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+            
+            // Buscar en el nombre del chat
+            if (nameNormalized.includes(searchLower)) {
+                results.push(chat);
+                // Limitar a 20 resultados
+                if (results.length >= 20) {
+                    break;
+                }
+            } else {
+                // Si es un chat individual, buscar también en el número
+                if (chat.isGroup === false && chat.id.user) {
+                    const phoneNumber = chat.id.user.replace('@c.us', '');
+                    if (phoneNumber.includes(searchTerm)) {
+                        results.push(chat);
+                        if (results.length >= 20) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        return results;
+    } catch (error) {
+        console.error('Error al buscar chats:', error.message);
+        return [];
+    }
+}
+
+/**
+ * Muestra los resultados de búsqueda y permite seleccionar un chat
+ */
+async function showSearchResults(searchTerm) {
+    console.clear();
+    console.log('═══════════════════════════════════════════════════');
+    console.log(`Resultados de búsqueda para: "${searchTerm}"`);
+    console.log('═══════════════════════════════════════════════════\n');
+    
+    const results = await searchChats(searchTerm);
+    
+    if (results.length === 0) {
+        console.log('No se encontraron chats que coincidan con la búsqueda.');
+        console.log('\n');
+        showMenu();
+        return;
+    }
+    
+    // Mostrar resultados numerados
+    results.forEach((chat, index) => {
+        const chatName = getChatName(chat);
+        console.log(`${index}: ${chatName}`);
+    });
+    
+    console.log('\n═══════════════════════════════════════════════════');
+    console.log(`Se encontraron ${results.length} resultado(s)`);
+    if (results.length === 20) {
+        console.log('(Mostrando solo los primeros 20 resultados)');
+    }
+    console.log('═══════════════════════════════════════════════════\n');
+    
+    rl.question('Introduce el número del chat para abrir (o presiona Enter para volver al menú): ', async (input) => {
+        const index = parseInt(input.trim());
+        
+        if (isNaN(index) || index < 0 || index >= results.length) {
+            if (input.trim() === '') {
+                showMenu();
+            } else {
+                console.log('Número de chat no válido.');
+                showMenu();
+            }
+            return;
+        }
+        
+        const selectedChat = results[index];
+        // Limpiar pantalla al entrar al chat
+        console.clear();
+        await showChatHistory(selectedChat);
+        chatLoop(selectedChat);
+    });
+}
+
+/**
  * Obtiene el nombre del chat de forma eficiente
  */
 function getChatName(chat) {
@@ -330,8 +426,9 @@ async function refreshMenuView(showMenuOptions = false) {
             `Elige una opción:\n` +
             `1. Listar los últimos 20 chats\n` +
             `2. Seleccionar un chat para chatear\n` +
-            `3. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
-            `4. Salir\n> `
+            `3. Buscar chat\n` +
+            `4. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
+            `5. Salir\n> `
         );
     }
     return '';
@@ -680,6 +777,18 @@ async function handleMenuOption(option) {
             break;
 
         case '3':
+            rl.question('Introduce el término de búsqueda: ', async (searchTerm) => {
+                const term = searchTerm.trim();
+                if (term === '') {
+                    console.log('Término de búsqueda vacío.');
+                    showMenu();
+                    return;
+                }
+                await showSearchResults(term);
+            });
+            break;
+
+        case '4':
             state.doNotDisturb = !state.doNotDisturb;
             // Si se activa "No Molestar", actualizar la lista de chats primero
             if (state.doNotDisturb) {
@@ -689,7 +798,7 @@ async function handleMenuOption(option) {
             showMenu();
             break;
 
-        case '4':
+        case '5':
             console.log('Saliendo...');
             rl.close();
             process.exit(0);
@@ -724,8 +833,9 @@ function showMenu() {
             `Elige una opción:\n` +
             `1. Listar los últimos 20 chats\n` +
             `2. Seleccionar un chat para chatear\n` +
-            `3. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
-            `4. Salir\n> `
+            `3. Buscar chat\n` +
+            `4. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
+            `5. Salir\n> `
         );
         process.stdout.write(menuText);
         
@@ -828,8 +938,9 @@ client.on('message', async (message) => {
                 `Elige una opción:\n` +
                 `1. Listar los últimos 20 chats\n` +
                 `2. Seleccionar un chat para chatear\n` +
-                `3. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
-                `4. Salir\n> `
+                `3. Buscar chat\n` +
+                `4. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
+                `5. Salir\n> `
             );
             process.stdout.write(menuText);
             rl.resume();
