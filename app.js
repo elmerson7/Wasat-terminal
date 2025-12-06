@@ -1,62 +1,246 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
-const readline = require('readline');
-let chalk;
-import('chalk').then(module => {
-    chalk = module.default;
-});
+import whatsappWeb from 'whatsapp-web.js';
+import qrcode from 'qrcode-terminal';
+import readline from 'readline';
+import chalk from 'chalk';
 
+const { Client, LocalAuth } = whatsappWeb;
+
+// Configuración del cliente con optimizaciones de memoria
 const client = new Client({
     authStrategy: new LocalAuth({ clientId: 'client1' }),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--no-first-run',
+            '--disable-extensions'
+        ]
     }
 });
 
-// Interfaz de línea de comandos para interacción
+// Interfaz de línea de comandos
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
 });
 
-// Variables globales
-let chats = [];
-let currentChat = null;
-let doNotDisturb = true; // Modo No Molestar activado por defecto
-let messageHistoryLimit = 10;
+// Estado de la aplicación - optimizado para memoria
+const state = {
+    // Solo almacenar IDs y datos mínimos de chats
+    chatCache: new Map(), // Map<index, chatId>
+    chatMetadata: new Map(), // Map<chatId, {name, timestamp}>
+    currentChatId: null,
+    doNotDisturb: true,
+    messageHistoryLimit: 10,
+    isInChatLoop: false
+};
 
-// Función para inicializar el cliente y cargar los chats
-client.on('qr', (qr) => {
-    console.log('Escanea este código QR con tu teléfono:');
-    qrcode.generate(qr, { small: true });
-});
+// Cache de mensajes recientes para evitar recargas innecesarias
+const messageCache = new WeakMap();
 
-client.on('ready', async () => {
-    console.log('Cliente está listo!');
-    await loadChats();
-    showMenu();
-});
+/**
+ * Obtiene el nombre del chat de forma eficiente
+ */
+function getChatName(chat) {
+    return chat.name || chat.formattedTitle || chat.id.user || 'Sin nombre';
+}
 
-// Cargar los últimos 20 chats y ordenarlos por la última actividad
+/**
+ * Formatea la fecha de los mensajes
+ */
+function formatDate(timestamp) {
+    const date = new Date(timestamp * 1000);
+    return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
+}
+
+/**
+ * Obtiene descripción del contenido multimedia
+ */
+function getMediaDescription(msg) {
+    const sentOrReceived = msg.fromMe ? 'enviado' : 'recibido';
+    const mediaTypes = {
+        image: 'Imagen',
+        video: 'Video',
+        audio: 'Audio',
+        sticker: 'Sticker',
+        document: 'Documento'
+    };
+    
+    const type = mediaTypes[msg.type] || 'Media';
+    return chalk.green(`[${type} ${sentOrReceived}]`);
+}
+
+/**
+ * Carga y cachea solo los últimos 20 chats con datos mínimos
+ */
 async function loadChats() {
-    chats = await client.getChats();
-    if (chats.length > 0) {
-        chats.sort((a, b) => b.timestamp - a.timestamp);
-        console.log('Últimos 20 chats:');
-        const last20Chats = chats.slice(0, 20);
+    try {
+        const allChats = await client.getChats();
+        
+        if (allChats.length === 0) {
+            console.log('No hay chats disponibles.');
+            return;
+        }
+
+        // Ordenar por timestamp
+        const sortedChats = allChats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        const last20Chats = sortedChats.slice(0, 20);
+
+        // Limpiar cache anterior
+        state.chatCache.clear();
+        state.chatMetadata.clear();
+
+        // Almacenar solo datos esenciales
         last20Chats.forEach((chat, index) => {
-            console.log(`${index}: ${chat.name || chat.formattedTitle || chat.id.user}`);
+            const chatId = chat.id._serialized;
+            state.chatCache.set(index, chatId);
+            state.chatMetadata.set(chatId, {
+                name: getChatName(chat),
+                timestamp: chat.timestamp || 0
+            });
         });
-    } else {
-        console.log('No hay chats disponibles.');
+
+        console.log('Últimos 20 chats:');
+        last20Chats.forEach((chat, index) => {
+            console.log(`${index}: ${getChatName(chat)}`);
+        });
+    } catch (error) {
+        console.error('Error al cargar chats:', error.message);
     }
 }
 
-// Mostrar menú principal de opciones
+/**
+ * Obtiene un chat por su índice del cache
+ */
+async function getChatByIndex(index) {
+    const chatId = state.chatCache.get(Number(index));
+    if (!chatId) {
+        return null;
+    }
+    
+    try {
+        const chats = await client.getChats();
+        return chats.find(chat => chat.id._serialized === chatId) || null;
+    } catch (error) {
+        console.error('Error al obtener chat:', error.message);
+        return null;
+    }
+}
+
+/**
+ * Muestra el historial del chat de forma optimizada
+ */
+async function showChatHistory(chat) {
+    try {
+        const messages = await chat.fetchMessages({ limit: state.messageHistoryLimit });
+        
+        console.log('--- Historial breve del chat ---');
+        
+        // Procesar mensajes en orden inverso sin almacenarlos
+        const chatName = getChatName(chat);
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const msg = messages[i];
+            const from = msg.fromMe ? 'Yo' : chatName;
+            let content = msg.body || '';
+
+            if (msg.hasMedia) {
+                content = getMediaDescription(msg);
+            }
+
+            console.log(`[${from} - ${formatDate(msg.timestamp)}]: ${content}`);
+        }
+        
+        console.log('--- Fin del historial ---\n');
+        
+        // Limpiar referencias después de mostrar
+        messages.length = 0;
+    } catch (error) {
+        console.error('Error al cargar historial:', error.message);
+    }
+}
+
+/**
+ * Muestra el estado del contacto
+ */
+async function showContactStatus(chat) {
+    try {
+        const presence = await chat.getPresence();
+        const status = presence.isOnline 
+            ? 'En línea' 
+            : `Visto por última vez el ${presence.lastSeen ? formatDate(presence.lastSeen) : 'desconocido'}`;
+        console.log(`Estado del contacto: ${status}`);
+    } catch (error) {
+        console.log('No se pudo obtener el estado del contacto.');
+    }
+}
+
+/**
+ * Bucle principal para enviar mensajes en un chat
+ */
+function chatLoop(chat) {
+    if (state.isInChatLoop) {
+        return; // Evitar múltiples loops simultáneos
+    }
+    
+    state.isInChatLoop = true;
+    state.currentChatId = chat.id._serialized;
+    
+    const promptMessage = () => {
+        rl.question('Escribe tu mensaje (o usa "<", "salir" o ".." para volver al menú): ', async (message) => {
+            const cleanMessage = message.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+            
+            if (['<', 'salir', '..'].includes(cleanMessage)) {
+                state.currentChatId = null;
+                state.isInChatLoop = false;
+                console.log('Volviendo al menú principal...');
+                showMenu();
+                return;
+            }
+            
+            if (cleanMessage === 'mas') {
+                state.messageHistoryLimit += 20;
+                await showChatHistory(chat);
+                promptMessage();
+                return;
+            }
+            
+            if (!message.trim()) {
+                promptMessage();
+                return;
+            }
+            
+            try {
+                await client.sendMessage(chat.id._serialized, message);
+                console.log(`Mensaje enviado a ${getChatName(chat)}: ${message}`);
+            } catch (error) {
+                console.error('Error al enviar el mensaje:', error.message);
+            }
+            
+            promptMessage();
+        });
+    };
+    
+    promptMessage();
+}
+
+/**
+ * Muestra el menú principal
+ */
 function showMenu() {
-    // Aplicar color azul al menú
-    rl.question(chalk.blue(`\nElige una opción:\n1. Listar los últimos 20 chats\n2. Seleccionar un chat para chatear\n3. No Molestar (${doNotDisturb ? 'Activo' : 'Inactivo'})\n4. Salir\n> `), async (input) => {
-        switch (input.trim()) {
+    const menuText = chalk.blue(
+        `\nElige una opción:\n` +
+        `1. Listar los últimos 20 chats\n` +
+        `2. Seleccionar un chat para chatear\n` +
+        `3. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
+        `4. Salir\n> `
+    );
+    
+    rl.question(menuText, async (input) => {
+        const option = input.trim();
+        
+        switch (option) {
             case '1':
                 await loadChats();
                 showMenu();
@@ -64,12 +248,13 @@ function showMenu() {
 
             case '2':
                 rl.question('Introduce el número del chat: ', async (chatIndex) => {
-                    currentChat = chats[chatIndex];
-                    if (currentChat) {
-                        console.log(chalk.green(`Chat seleccionado: ${currentChat.name || currentChat.formattedTitle || currentChat.id.user}`));
-                        showContactStatus(currentChat);
-                        await showChatHistory(currentChat);
-                        chatLoop(currentChat);
+                    const chat = await getChatByIndex(chatIndex);
+                    
+                    if (chat) {
+                        console.log(chalk.green(`Chat seleccionado: ${getChatName(chat)}`));
+                        await showContactStatus(chat);
+                        await showChatHistory(chat);
+                        chatLoop(chat);
                     } else {
                         console.log('Índice de chat no válido.');
                         showMenu();
@@ -78,13 +263,14 @@ function showMenu() {
                 break;
 
             case '3':
-                doNotDisturb = !doNotDisturb;
-                console.log(`Modo No Molestar ${doNotDisturb ? 'activado' : 'desactivado'}`);
+                state.doNotDisturb = !state.doNotDisturb;
+                console.log(`Modo No Molestar ${state.doNotDisturb ? 'activado' : 'desactivado'}`);
                 showMenu();
                 break;
 
             case '4':
                 console.log('Saliendo...');
+                await cleanup();
                 rl.close();
                 process.exit(0);
                 break;
@@ -97,95 +283,83 @@ function showMenu() {
     });
 }
 
-// Función para obtener una descripción del contenido multimedia
-function getMediaDescription(msg) {
-    const sentOrReceived = msg.fromMe ? 'enviado' : 'recibido';
-    switch (msg.type) {
-        case 'image':
-            return chalk.green(`[Imagen ${sentOrReceived}]`);
-        case 'video':
-            return chalk.green(`[Video ${sentOrReceived}]`);
-        case 'audio':
-            return chalk.green(`[Audio ${sentOrReceived}]`);
-        case 'sticker':
-            return chalk.green(`[Sticker ${sentOrReceived}]`);
-        case 'document':
-            return chalk.green(`[Documento ${sentOrReceived}]`);
-        default:
-            return chalk.green(`[Media ${sentOrReceived}]`);
-    }
-}
-
-// Mostrar historial breve del chat seleccionado
-async function showChatHistory(chat) {
-    const messages = await chat.fetchMessages({ limit: messageHistoryLimit });
-    console.log('--- Historial breve del chat ---');
-    messages.reverse().forEach(msg => {
-        const from = msg.fromMe ? 'Yo' : (chat.name || chat.formattedTitle || chat.id.user);
-        let content = msg.body;
-
-        if (msg.hasMedia) {
-            content = getMediaDescription(msg);
-        }
-
-        console.log(`[${from} - ${formatDate(msg.timestamp)}]: ${content}`);
-    });
-    console.log('--- Fin del historial ---\n');
-}
-
-// Formatear la fecha de los mensajes
-const formatDate = (timestamp) => {
-    const date = new Date(timestamp * 1000);
-    return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
-};
-
-// Mostrar el estado del contacto (en línea, visto por última vez)
-async function showContactStatus(chat) {
+/**
+ * Limpieza de recursos antes de salir
+ */
+async function cleanup() {
     try {
-        const presence = await chat.getPresence();
-        const status = presence.isOnline ? 'En línea' : `Visto por última vez el ${presence.lastSeen ? formatDate(presence.lastSeen) : 'desconocido'}`;
-        console.log(`Estado del contacto: ${status}`);
-    } catch (err) {
-        console.log('No se pudo obtener el estado del contacto.');
+        state.chatCache.clear();
+        state.chatMetadata.clear();
+        messageCache.clear();
+        state.currentChatId = null;
+    } catch (error) {
+        // Ignorar errores en limpieza
     }
 }
 
-// Escuchar mensajes y notificar si se reciben de otros chats cuando no estás en uno activo
+/**
+ * Maneja mensajes entrantes de forma optimizada
+ */
 client.on('message', async (message) => {
-    if (!message.isStatus) {
-        const chat = chats.find(c => c.id._serialized === message.from);
-        const sender = chat ? (chat.name || chat.formattedTitle || chat.id.user) : 'Desconocido';
+    if (message.isStatus) {
+        return;
+    }
+    
+    // Solo mostrar mensajes si no estamos en modo No Molestar o si no es del chat actual
+    if (state.doNotDisturb && state.currentChatId === message.from) {
+        return;
+    }
+    
+    try {
+        const chatId = message.from;
+        const metadata = state.chatMetadata.get(chatId);
+        const sender = metadata ? metadata.name : 'Desconocido';
         
-        if (message.hasMedia) {
-            console.log(`\nMensaje multimedia de ${sender}: ${getMediaDescription(message)}`);
-        } else {
-            console.log(`\nMensaje de ${sender}: ${message.body}`);
-        }
+        const content = message.hasMedia 
+            ? getMediaDescription(message) 
+            : (message.body || '[Mensaje vacío]');
+        
+        console.log(`\nMensaje de ${sender}: ${content}`);
+    } catch (error) {
+        // Ignorar errores al procesar mensajes
     }
 });
 
-// Bucle para enviar mensajes en el chat actual con atajos para salir
-function chatLoop(chat) {
-    rl.question('Escribe tu mensaje (o usa "<", "salir" o ".." para volver al menú): ', (message) => {
-        const cleanMessage = message.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-        if (['<', 'salir', '..'].includes(cleanMessage)) {
-            currentChat = null;
-            console.log('Volviendo al menú principal...');
-            showMenu();
-        } else if (cleanMessage === 'mas') {
-            messageHistoryLimit += 20;
-            showChatHistory(chat).then(() => chatLoop(chat));
-        } else {
-            client.sendMessage(chat.id._serialized, message).then(() => {
-                console.log(`Mensaje enviado a ${chat.name || chat.formattedTitle || chat.id.user}: ${message}`);
-                chatLoop(chat);
-            }).catch((err) => {
-                console.error('Error al enviar el mensaje:', err);
-                chatLoop(chat);
-            });
-        }
-    });
-}
+// Eventos del cliente
+client.on('qr', (qr) => {
+    console.log('Escanea este código QR con tu teléfono:');
+    qrcode.generate(qr, { small: true });
+});
 
+client.on('ready', async () => {
+    console.log('Cliente está listo!');
+    await loadChats();
+    showMenu();
+});
+
+client.on('disconnected', (reason) => {
+    console.log('Cliente desconectado:', reason);
+});
+
+client.on('auth_failure', (msg) => {
+    console.error('Error de autenticación:', msg);
+});
+
+// Manejo de señales para limpieza adecuada
+process.on('SIGINT', async () => {
+    console.log('\nCerrando aplicación...');
+    await cleanup();
+    rl.close();
+    process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+    await cleanup();
+    rl.close();
+    process.exit(0);
+});
+
+// Inicializar cliente
 client.initialize();
 console.log('Inicializando cliente...');
+

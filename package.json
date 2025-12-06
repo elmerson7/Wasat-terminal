@@ -1,19 +1,36 @@
 {
-    "name": "ws",
-    "version": "1.0.0",
-    "main": "index.js",
+    "name": "ws-terminal-optimized",
+    "version": "2.0.0",
+    "type": "module",
+    "main": "app.js",
+    "engines": {
+        "node": ">=24.0.0"
+    },
     "scripts": {
+        "start": "node app.js",
         "test": "echo \"Error: no test specified\" && exit 1"
     },
-    "keywords": [],
+    "keywords": [
+        "whatsapp",
+        "terminal",
+        "cli",
+        "whatsapp-web"
+    ],
     "author": "",
     "license": "ISC",
-    "description": "",
+    "description": "Terminal optimizado para WhatsApp Web con mejor gestión de memoria",
     "dependencies": {
         "chalk": "^5.3.0",
-        "puppeteer": "^23.6.1",
-        "puppeteer-core": "^23.6.1",
+        "puppeteer": "^24.15.0",
         "qrcode-terminal": "^0.12.0",
         "whatsapp-web.js": "^1.26.0"
+    },
+    "overrides": {
+        "rimraf": "^5.0.5",
+        "glob": "^11.0.0",
+        "inflight": "npm:@npmcli/inflight@^1.0.7",
+        "fstream": "^1.0.12",
+        "puppeteer": "^24.15.0"
     }
 }
+
