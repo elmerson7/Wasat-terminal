@@ -41,6 +41,10 @@ const state = {
 // Cache de mensajes recientes para evitar recargas innecesarias
 const messageCache = new WeakMap();
 
+// Array para almacenar notificaciones recientes
+const notifications = [];
+const MAX_NOTIFICATIONS = 10;
+
 /**
  * Obtiene el nombre del chat de forma eficiente
  */
@@ -168,10 +172,8 @@ async function updateChatOnNewMessage(chatId) {
         // Reordenar y actualizar cache
         await refreshChatList();
         
-        // Si estamos en el menú principal, refrescar visualización
-        if (state.isInMenu && !state.currentChatId) {
-            await displayChatList();
-        }
+        // NO mostrar la lista automáticamente aquí
+        // Se mostrará desde el handler de mensajes si es necesario
     } catch (error) {
         // Ignorar errores silenciosamente
     }
@@ -191,6 +193,7 @@ async function refreshChatList() {
         last20Chats.forEach((chat, index) => {
             const chatId = chat.id._serialized;
             state.chatCache.set(index, chatId);
+            // Preservar metadata existente o crear nuevo
             if (!state.chatMetadata.has(chatId)) {
                 // Inicializar con contador en 0 (se actualizará cuando lleguen mensajes)
                 state.chatMetadata.set(chatId, {
@@ -199,6 +202,12 @@ async function refreshChatList() {
                     unread: false,
                     unreadCount: 0
                 });
+            } else {
+                // Actualizar solo el nombre y timestamp, preservar unreadCount
+                const existingMetadata = state.chatMetadata.get(chatId);
+                existingMetadata.name = getChatName(chat);
+                existingMetadata.timestamp = chat.timestamp || 0;
+                state.chatMetadata.set(chatId, existingMetadata);
             }
         });
     } catch (error) {
@@ -207,13 +216,10 @@ async function refreshChatList() {
 }
 
 /**
- * Muestra la lista de chats en pantalla
+ * Muestra la lista de chats en pantalla (sin saltos de línea al inicio)
  */
 async function displayChatList() {
-    // Limpiar pantalla (opcional, puede ser molesto)
-    // console.clear(); // Descomenta si quieres limpiar pantalla
-    
-    console.log('\n═══════════════════════════════════════════════════');
+    console.log('═══════════════════════════════════════════════════');
     console.log('Últimos 20 chats:');
     
     for (let i = 0; i < 20; i++) {
@@ -231,7 +237,94 @@ async function displayChatList() {
         }
     }
     
-    console.log('═══════════════════════════════════════════════════\n');
+    console.log('═══════════════════════════════════════════════════');
+}
+
+/**
+ * Muestra las notificaciones recientes
+ * Solo se muestra si "No Molestar" está desactivado
+ */
+function displayNotifications() {
+    // Solo mostrar el área de notificaciones si "No Molestar" está desactivado
+    if (state.doNotDisturb) {
+        return; // No mostrar nada si está activo
+    }
+    
+    console.log('\n[Área de notificaciones]');
+    if (notifications.length === 0) {
+        console.log('(Sin notificaciones nuevas)');
+    } else {
+        // Mostrar las últimas notificaciones (máximo MAX_NOTIFICATIONS)
+        const recentNotifications = notifications.slice(-MAX_NOTIFICATIONS);
+        recentNotifications.forEach(notif => {
+            console.log(notif.message);
+        });
+    }
+    console.log('───────────────────────────────────────────────────\n');
+}
+
+/**
+ * Agrega una notificación al array
+ * @param {string} chatId - ID del chat que envió el mensaje
+ * @param {string} message - Mensaje de notificación formateado
+ */
+function addNotification(chatId, message) {
+    notifications.push({ chatId, message });
+    // Mantener solo las últimas MAX_NOTIFICATIONS
+    if (notifications.length > MAX_NOTIFICATIONS) {
+        notifications.shift();
+    }
+}
+
+/**
+ * Dibuja la vista completa del menú (lista + notificaciones + opciones)
+ */
+async function drawMenuView() {
+    await displayChatList();
+    displayNotifications();
+}
+
+/**
+ * Redibuja la vista completa del menú limpiando la pantalla primero
+ * @param {boolean} showMenuOptions - Si es true, retorna también el texto del menú para usar con rl.question()
+ */
+async function refreshMenuView(showMenuOptions = false) {
+    // Limpiar pantalla completamente
+    console.clear();
+    // Redibujar todo desde cero
+    await drawMenuView();
+    // Si se solicita, retornar el texto del menú (no escribirlo directamente)
+    if (showMenuOptions) {
+        return chalk.blue(
+            `Elige una opción:\n` +
+            `1. Listar los últimos 20 chats\n` +
+            `2. Seleccionar un chat para chatear\n` +
+            `3. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
+            `4. Salir\n> `
+        );
+    }
+    return '';
+}
+
+/**
+ * Limpia las notificaciones
+ */
+function clearNotifications() {
+    notifications.length = 0;
+}
+
+/**
+ * Elimina las notificaciones de un chat específico
+ * @param {string} chatId - ID del chat cuyas notificaciones se eliminarán
+ */
+function removeNotificationsByChatId(chatId) {
+    const initialLength = notifications.length;
+    // Filtrar las notificaciones, manteniendo solo las que NO son del chatId especificado
+    for (let i = notifications.length - 1; i >= 0; i--) {
+        if (notifications[i].chatId === chatId) {
+            notifications.splice(i, 1);
+        }
+    }
 }
 
 /**
@@ -241,7 +334,7 @@ async function loadChats() {
     await refreshChatList();
     // Actualizar contadores de mensajes no leídos
     await updateUnreadCounts();
-    await displayChatList();
+    await drawMenuView();
 }
 
 /**
@@ -408,6 +501,9 @@ function chatLoop(chat) {
         state.chatMetadata.set(chatId, metadata);
     }
     
+    // Eliminar las notificaciones de este chat específico al entrar
+    removeNotificationsByChatId(chatId);
+    
     const promptMessage = () => {
         rl.question('> ', async (message) => {
             // Limpiar inmediatamente la línea del prompt que readline mostró
@@ -489,7 +585,9 @@ function chatLoop(chat) {
             if (['<', 'salir', '..'].includes(cleanMessage)) {
                 state.currentChatId = null;
                 state.isInChatLoop = false;
-                console.log('\nVolviendo al menú principal...\n');
+                // Limpiar pantalla y volver al menú
+                console.clear();
+                console.log('Volviendo al menú principal...\n');
                 showMenu();
                 return;
             }
@@ -524,60 +622,91 @@ function chatLoop(chat) {
 }
 
 /**
+ * Maneja las opciones del menú
+ */
+async function handleMenuOption(option) {
+    switch (option) {
+        case '1':
+            await loadChats();
+            showMenu();
+            break;
+
+        case '2':
+            rl.question('Introduce el número del chat: ', async (chatIndex) => {
+                const chat = await getChatByIndex(chatIndex);
+                
+                if (chat) {
+                    // Limpiar pantalla al entrar al chat
+                    console.clear();
+                    await showChatHistory(chat);
+                    chatLoop(chat);
+                } else {
+                    console.log('Índice de chat no válido.');
+                    showMenu();
+                }
+            });
+            break;
+
+        case '3':
+            state.doNotDisturb = !state.doNotDisturb;
+            // Si se activa "No Molestar", actualizar la lista de chats primero
+            if (state.doNotDisturb) {
+                await refreshChatList();
+            }
+            console.log(`Modo No Molestar ${state.doNotDisturb ? 'activado' : 'desactivado'}`);
+            showMenu();
+            break;
+
+        case '4':
+            console.log('Saliendo...');
+            rl.close();
+            process.exit(0);
+            break;
+
+        default:
+            console.log('Opción no válida. Intenta de nuevo.');
+            showMenu();
+            break;
+    }
+}
+
+// Variable para rastrear el listener activo del menú
+let menuInputHandler = null;
+
+/**
  * Muestra el menú principal
  */
 function showMenu() {
     state.isInMenu = true;
     state.currentChatId = null;
     
-    const menuText = chalk.blue(
-        `\nElige una opción:\n` +
-        `1. Listar los últimos 20 chats\n` +
-        `2. Seleccionar un chat para chatear\n` +
-        `3. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
-        `4. Salir\n> `
-    );
+    // Remover cualquier listener anterior
+    if (menuInputHandler) {
+        rl.removeListener('line', menuInputHandler);
+    }
     
-    rl.question(menuText, async (input) => {
-        const option = input.trim();
+    // Limpiar pantalla y dibujar la vista completa del menú
+    refreshMenuView(false).then(() => {
+        // Mostrar el menú de opciones
+        const menuText = chalk.blue(
+            `Elige una opción:\n` +
+            `1. Listar los últimos 20 chats\n` +
+            `2. Seleccionar un chat para chatear\n` +
+            `3. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
+            `4. Salir\n> `
+        );
+        process.stdout.write(menuText);
         
-        switch (option) {
-            case '1':
-                await loadChats();
-                showMenu();
-                break;
-
-            case '2':
-                rl.question('Introduce el número del chat: ', async (chatIndex) => {
-                    const chat = await getChatByIndex(chatIndex);
-                    
-                    if (chat) {
-                        await showChatHistory(chat);
-                        chatLoop(chat);
-                    } else {
-                        console.log('Índice de chat no válido.');
-                        showMenu();
-                    }
-                });
-                break;
-
-            case '3':
-                state.doNotDisturb = !state.doNotDisturb;
-                console.log(`Modo No Molestar ${state.doNotDisturb ? 'activado' : 'desactivado'}`);
-                showMenu();
-                break;
-
-            case '4':
-                console.log('Saliendo...');
-                rl.close();
-                process.exit(0);
-                break;
-
-            default:
-                console.log('Opción no válida. Intenta de nuevo.');
-                showMenu();
-                break;
-        }
+        // Crear el handler de input
+        menuInputHandler = async (input) => {
+            rl.removeListener('line', menuInputHandler);
+            menuInputHandler = null;
+            await handleMenuOption(input.trim());
+        };
+        
+        rl.setPrompt('> ');
+        rl.prompt();
+        rl.once('line', menuInputHandler);
     });
 }
 
@@ -634,6 +763,15 @@ client.on('message', async (message) => {
             return;
         }
         
+        // Si estamos en un chat pero nos escribe OTRA persona, guardar la notificación para cuando volvamos al menú
+        if (state.currentChatId && state.currentChatId !== chatId) {
+            await updateChatOnNewMessage(chatId);
+            // Agregar notificación al array para cuando vuelvas al menú (con chatId para poder eliminarla después)
+            const notificationMsg = chalk.yellow(`💬 Nuevo mensaje de ${sender}: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`);
+            addNotification(chatId, notificationMsg);
+            return; // No mostrar nada en pantalla, solo guardar para después
+        }
+        
         // Si estamos en el menú y "No Molestar" está activo, NO actualizar la lista ni mostrar notificación
         if (state.isInMenu && state.doNotDisturb) {
             // No hacer nada, la lista no se actualiza ni se muestran notificaciones
@@ -643,8 +781,37 @@ client.on('message', async (message) => {
         // Si estamos en el menú y "No Molestar" está desactivado, SÍ actualizar y mostrar notificación
         if (state.isInMenu && !state.currentChatId) {
             await updateChatOnNewMessage(chatId);
-            // Mostrar notificación discreta
-            console.log(chalk.yellow(`\n💬 Nuevo mensaje de ${sender}: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`));
+            // Agregar notificación al array (con chatId para poder eliminarla después)
+            const notificationMsg = chalk.yellow(`💬 Nuevo mensaje de ${sender}: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`);
+            addNotification(chatId, notificationMsg);
+            // Limpiar pantalla y redibujar todo desde cero
+            rl.pause();
+            // Remover el listener anterior si existe
+            if (menuInputHandler) {
+                rl.removeListener('line', menuInputHandler);
+                menuInputHandler = null;
+            }
+            await refreshMenuView(false);
+            // Mostrar el menú de opciones directamente
+            const menuText = chalk.blue(
+                `Elige una opción:\n` +
+                `1. Listar los últimos 20 chats\n` +
+                `2. Seleccionar un chat para chatear\n` +
+                `3. No Molestar (${state.doNotDisturb ? 'Activo' : 'Inactivo'})\n` +
+                `4. Salir\n> `
+            );
+            process.stdout.write(menuText);
+            rl.resume();
+            // Configurar el prompt y esperar input
+            rl.setPrompt('> ');
+            rl.prompt();
+            // Crear nuevo handler de input
+            menuInputHandler = async (input) => {
+                rl.removeListener('line', menuInputHandler);
+                menuInputHandler = null;
+                await handleMenuOption(input.trim());
+            };
+            rl.once('line', menuInputHandler);
         }
     } catch (error) {
         // Ignorar errores al procesar mensajes
@@ -660,7 +827,7 @@ client.on('qr', (qr) => {
 client.on('ready', async () => {
     console.log('Cliente está listo!');
     await loadChats();
-            showMenu();
+    showMenu();
 });
 
 client.on('disconnected', (reason) => {
