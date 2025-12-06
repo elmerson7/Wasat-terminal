@@ -38,9 +38,6 @@ const state = {
     isInMenu: true  // Nuevo: rastrear si estamos en el menú
 };
 
-// Cache de mensajes recientes para evitar recargas innecesarias
-const messageCache = new WeakMap();
-
 // Array para almacenar notificaciones recientes
 const notifications = [];
 const MAX_NOTIFICATIONS = 10;
@@ -180,6 +177,37 @@ async function updateChatOnNewMessage(chatId) {
 }
 
 /**
+ * Limpia metadata de chats que ya no están en los top 20
+ * Evita memory leaks en sesiones largas
+ */
+function periodicMemoryCleanup() {
+    try {
+        // Obtener IDs de chats que están actualmente en cache (top 20)
+        const activeChatIds = new Set(Array.from(state.chatCache.values()));
+        
+        // Eliminar metadata de chats que ya no están en los top 20
+        const idsToRemove = [];
+        for (const [chatId] of state.chatMetadata.entries()) {
+            if (!activeChatIds.has(chatId)) {
+                idsToRemove.push(chatId);
+            }
+        }
+        
+        // Eliminar metadata obsoleta
+        idsToRemove.forEach(id => {
+            state.chatMetadata.delete(id);
+        });
+        
+        // Log opcional para debugging (comentar en producción)
+        // if (idsToRemove.length > 0) {
+        //     console.log(`[Memory Cleanup] Eliminadas ${idsToRemove.length} entradas de metadata obsoletas`);
+        // }
+    } catch (error) {
+        // Ignorar errores en limpieza
+    }
+}
+
+/**
  * Refresca la lista de chats internamente (sin mostrar)
  */
 async function refreshChatList() {
@@ -210,6 +238,9 @@ async function refreshChatList() {
                 state.chatMetadata.set(chatId, existingMetadata);
             }
         });
+        
+        // Limpiar metadata de chats que ya no están en los top 20
+        periodicMemoryCleanup();
     } catch (error) {
         // Ignorar errores
     }
@@ -334,7 +365,8 @@ async function loadChats() {
     await refreshChatList();
     // Actualizar contadores de mensajes no leídos
     await updateUnreadCounts();
-    await drawMenuView();
+    // Limpiar pantalla y redibujar todo desde cero
+    await refreshMenuView(false);
 }
 
 /**
@@ -717,7 +749,6 @@ async function cleanup() {
     try {
         state.chatCache.clear();
         state.chatMetadata.clear();
-        messageCache.clear();
         state.currentChatId = null;
     } catch (error) {
         // Ignorar errores en limpieza
@@ -828,6 +859,10 @@ client.on('ready', async () => {
     console.log('Cliente está listo!');
     await loadChats();
     showMenu();
+    
+    // Iniciar limpieza periódica de memoria cada 10 minutos como respaldo
+    // (La limpieza principal se ejecuta después de cada refreshChatList)
+    setInterval(periodicMemoryCleanup, 10 * 60 * 1000);
 });
 
 client.on('disconnected', (reason) => {
