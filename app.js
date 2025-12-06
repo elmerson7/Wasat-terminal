@@ -149,12 +149,20 @@ async function updateChatOnNewMessage(chatId) {
 
         // Actualizar metadata
         const existingMetadata = state.chatMetadata.get(chatId);
+        const isCurrentChat = state.currentChatId === chatId;
+        
+        // Si estamos dentro de este chat, no incrementar contador (ya lo estamos viendo)
+        // Si no estamos en este chat, incrementar contador de no leídos
+        let unreadCount = existingMetadata?.unreadCount || 0;
+        if (!isCurrentChat) {
+            unreadCount += 1;
+        }
+        
         state.chatMetadata.set(chatId, {
             name: getChatName(updatedChat),
             timestamp: updatedChat.timestamp || Date.now() / 1000,
-            // Si estamos dentro de este chat, no marcar como no leído (ya lo estamos viendo)
-            // Si no estamos en este chat, marcar como no leído
-            unread: state.currentChatId !== chatId ? true : (existingMetadata?.unread || false)
+            unread: unreadCount > 0,
+            unreadCount: unreadCount
         });
         
         // Reordenar y actualizar cache
@@ -184,10 +192,12 @@ async function refreshChatList() {
             const chatId = chat.id._serialized;
             state.chatCache.set(index, chatId);
             if (!state.chatMetadata.has(chatId)) {
+                // Inicializar con contador en 0 (se actualizará cuando lleguen mensajes)
                 state.chatMetadata.set(chatId, {
                     name: getChatName(chat),
                     timestamp: chat.timestamp || 0,
-                    unread: false // Chats nuevos no tienen mensajes no leídos inicialmente
+                    unread: false,
+                    unreadCount: 0
                 });
             }
         });
@@ -211,8 +221,11 @@ async function displayChatList() {
         if (chatId) {
             const metadata = state.chatMetadata.get(chatId);
             if (metadata) {
-                // Mostrar 🔔 solo si tiene mensajes no leídos
-                const indicator = metadata.unread ? ' 🔔' : '';
+                // Mostrar contador y 🔔 si tiene mensajes no leídos
+                let indicator = '';
+                if (metadata.unreadCount > 0) {
+                    indicator = ` (${metadata.unreadCount}) 🔔`;
+                }
                 console.log(`${i}: ${metadata.name}${indicator}`);
             }
         }
@@ -226,7 +239,42 @@ async function displayChatList() {
  */
 async function loadChats() {
     await refreshChatList();
+    // Actualizar contadores de mensajes no leídos
+    await updateUnreadCounts();
     await displayChatList();
+}
+
+/**
+ * Actualiza los contadores de mensajes no leídos para todos los chats en cache
+ */
+async function updateUnreadCounts() {
+    try {
+        const chats = await client.getChats();
+        for (let i = 0; i < 20; i++) {
+            const chatId = state.chatCache.get(i);
+            if (chatId) {
+                const chat = chats.find(c => c.id._serialized === chatId);
+                if (chat) {
+                    try {
+                        const unreadCount = await chat.getUnreadCount();
+                        const metadata = state.chatMetadata.get(chatId);
+                        if (metadata) {
+                            // Solo actualizar si no estamos dentro de ese chat
+                            if (state.currentChatId !== chatId) {
+                                metadata.unreadCount = unreadCount;
+                                metadata.unread = unreadCount > 0;
+                                state.chatMetadata.set(chatId, metadata);
+                            }
+                        }
+                    } catch (error) {
+                        // Ignorar errores al obtener contador
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        // Ignorar errores
+    }
 }
 
 /**
@@ -351,11 +399,12 @@ function chatLoop(chat) {
     state.currentChatId = chat.id._serialized;
     state.isInMenu = false; // Establecer a false cuando entras a un chat
     
-    // Marcar el chat como leído cuando entras
+    // Marcar el chat como leído cuando entras y resetear contador
     const chatId = chat.id._serialized;
     const metadata = state.chatMetadata.get(chatId);
     if (metadata) {
         metadata.unread = false;
+        metadata.unreadCount = 0;
         state.chatMetadata.set(chatId, metadata);
     }
     
@@ -556,20 +605,49 @@ client.on('message', async (message) => {
     
     const chatId = message.from;
     
-    // Si estamos dentro de un chat, SIEMPRE actualizar (porque estamos viendo ese chat)
-    if (state.currentChatId === chatId) {
-        await updateChatOnNewMessage(chatId);
-        // ... resto del código para mostrar el mensaje ...
-    }
-    // Si estamos en el menú y "No Molestar" está activo, NO actualizar la lista
-    else if (state.isInMenu && state.doNotDisturb) {
-        // No hacer nada, la lista no se actualiza
-        return;
-    }
-    // Si estamos en el menú y "No Molestar" está desactivado, SÍ actualizar
-    else {
-        await updateChatOnNewMessage(chatId);
-        // ... resto del código para mostrar notificación ...
+    try {
+        const metadata = state.chatMetadata.get(chatId);
+        const sender = metadata ? metadata.name : 'Desconocido';
+        
+        const content = message.hasMedia 
+            ? getMediaDescription(message) 
+            : (message.body || '[Mensaje vacío]');
+        
+        // Si estamos dentro de un chat, SIEMPRE mostrar mensajes de ese chat
+        if (state.currentChatId === chatId) {
+            await updateChatOnNewMessage(chatId);
+            // Marcar como leído automáticamente porque lo estamos viendo
+            const currentMetadata = state.chatMetadata.get(chatId);
+            if (currentMetadata) {
+                currentMetadata.unread = false;
+                currentMetadata.unreadCount = 0;
+                state.chatMetadata.set(chatId, currentMetadata);
+            }
+            // Pausar readline temporalmente para evitar que el prompt interfiera
+            rl.pause();
+            // Limpiar la línea del prompt: volver al inicio y limpiar hasta el final
+            process.stdout.write('\r\x1b[K');
+            // Mostrar con el mismo formato que el historial (en nueva línea)
+            formatMessage(message, sender);
+            // Reanudar readline (readline mostrará su prompt automáticamente)
+            rl.resume();
+            return;
+        }
+        
+        // Si estamos en el menú y "No Molestar" está activo, NO actualizar la lista ni mostrar notificación
+        if (state.isInMenu && state.doNotDisturb) {
+            // No hacer nada, la lista no se actualiza ni se muestran notificaciones
+            return;
+        }
+        
+        // Si estamos en el menú y "No Molestar" está desactivado, SÍ actualizar y mostrar notificación
+        if (state.isInMenu && !state.currentChatId) {
+            await updateChatOnNewMessage(chatId);
+            // Mostrar notificación discreta
+            console.log(chalk.yellow(`\n💬 Nuevo mensaje de ${sender}: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`));
+        }
+    } catch (error) {
+        // Ignorar errores al procesar mensajes
     }
 });
 
