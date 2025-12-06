@@ -34,7 +34,8 @@ const state = {
     currentChatId: null,
     doNotDisturb: true,
     messageHistoryLimit: 10,
-    isInChatLoop: false
+    isInChatLoop: false,
+    isInMenu: true  // Nuevo: rastrear si estamos en el menú
 };
 
 // Cache de mensajes recientes para evitar recargas innecesarias
@@ -48,11 +49,61 @@ function getChatName(chat) {
 }
 
 /**
- * Formatea la fecha de los mensajes
+ * Formatea la hora de los mensajes con formato inteligente (estilo WhatsApp)
  */
-function formatDate(timestamp) {
-    const date = new Date(timestamp * 1000);
-    return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
+function formatTime(timestamp) {
+    const msgDate = new Date(timestamp * 1000);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const msgDay = new Date(msgDate.getFullYear(), msgDate.getMonth(), msgDate.getDate());
+    
+    const timeStr = msgDate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+    
+    // Si es hoy, solo mostrar hora
+    if (msgDay.getTime() === today.getTime()) {
+        return timeStr;
+    }
+    
+    // Si es ayer
+    if (msgDay.getTime() === yesterday.getTime()) {
+        return `Ayer ${timeStr}`;
+    }
+    
+    // Si es esta semana (últimos 7 días)
+    const daysDiff = Math.floor((today - msgDay) / (1000 * 60 * 60 * 24));
+    if (daysDiff <= 7) {
+        const dayName = msgDate.toLocaleDateString('es-ES', { weekday: 'short' });
+        return `${dayName} ${timeStr}`;
+    }
+    
+    // Si es del mismo año, mostrar día/mes
+    if (msgDate.getFullYear() === now.getFullYear()) {
+        return `${msgDate.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' })} ${timeStr}`;
+    }
+    
+    // Si es de otro año, mostrar día/mes/año
+    return `${msgDate.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${timeStr}`;
+}
+
+/**
+ * Formatea un mensaje con el estilo tipo WhatsApp
+ */
+function formatMessage(msg, chatName) {
+    const time = formatTime(msg.timestamp);
+    const from = msg.fromMe ? 'Yo' : chatName;
+    let content = msg.body || '';
+
+    if (msg.hasMedia) {
+        content = getMediaDescription(msg);
+    }
+
+    // Aplicar colores: mensajes propios en azul, recibidos en blanco
+    const senderColor = msg.fromMe ? chalk.blue : chalk.white;
+    const timeColor = chalk.gray;
+    
+    console.log(`${timeColor(`[${time}]`)} ${senderColor(from)}: ${content}`);
 }
 
 /**
@@ -73,42 +124,96 @@ function getMediaDescription(msg) {
 }
 
 /**
- * Carga y cachea solo los últimos 20 chats con datos mínimos
+ * Actualiza un chat específico cuando recibe un mensaje nuevo
  */
-async function loadChats() {
+async function updateChatOnNewMessage(chatId) {
+    try {
+        // Obtener el chat actualizado
+        const chats = await client.getChats();
+        const updatedChat = chats.find(c => c.id._serialized === chatId);
+        
+        if (!updatedChat) return;
+        
+        // Actualizar metadata
+        const existingMetadata = state.chatMetadata.get(chatId);
+        state.chatMetadata.set(chatId, {
+            name: getChatName(updatedChat),
+            timestamp: updatedChat.timestamp || Date.now() / 1000,
+            // Si estamos dentro de este chat, no marcar como no leído (ya lo estamos viendo)
+            // Si no estamos en este chat, marcar como no leído
+            unread: state.currentChatId !== chatId ? true : (existingMetadata?.unread || false)
+        });
+        
+        // Reordenar y actualizar cache
+        await refreshChatList();
+        
+        // Si estamos en el menú principal, refrescar visualización
+        if (state.isInMenu && !state.currentChatId) {
+            await displayChatList();
+        }
+    } catch (error) {
+        // Ignorar errores silenciosamente
+    }
+}
+
+/**
+ * Refresca la lista de chats internamente (sin mostrar)
+ */
+async function refreshChatList() {
     try {
         const allChats = await client.getChats();
-        
-        if (allChats.length === 0) {
-            console.log('No hay chats disponibles.');
-            return;
-        }
-
-        // Ordenar por timestamp
         const sortedChats = allChats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
         const last20Chats = sortedChats.slice(0, 20);
-
-        // Limpiar cache anterior
+        
+        // Limpiar y actualizar cache
         state.chatCache.clear();
-        state.chatMetadata.clear();
-
-        // Almacenar solo datos esenciales
         last20Chats.forEach((chat, index) => {
             const chatId = chat.id._serialized;
             state.chatCache.set(index, chatId);
-            state.chatMetadata.set(chatId, {
-                name: getChatName(chat),
-                timestamp: chat.timestamp || 0
-            });
-        });
-
-        console.log('Últimos 20 chats:');
-        last20Chats.forEach((chat, index) => {
-            console.log(`${index}: ${getChatName(chat)}`);
+            if (!state.chatMetadata.has(chatId)) {
+                state.chatMetadata.set(chatId, {
+                    name: getChatName(chat),
+                    timestamp: chat.timestamp || 0,
+                    unread: false // Chats nuevos no tienen mensajes no leídos inicialmente
+                });
+            }
         });
     } catch (error) {
-        console.error('Error al cargar chats:', error.message);
+        // Ignorar errores
     }
+}
+
+/**
+ * Muestra la lista de chats en pantalla
+ */
+async function displayChatList() {
+    // Limpiar pantalla (opcional, puede ser molesto)
+    // console.clear(); // Descomenta si quieres limpiar pantalla
+    
+    console.log('\n═══════════════════════════════════════════════════');
+    console.log('Últimos 20 chats:');
+    
+    for (let i = 0; i < 20; i++) {
+        const chatId = state.chatCache.get(i);
+        if (chatId) {
+            const metadata = state.chatMetadata.get(chatId);
+            if (metadata) {
+                // Mostrar 🔔 solo si tiene mensajes no leídos
+                const indicator = metadata.unread ? ' 🔔' : '';
+                console.log(`${i}: ${metadata.name}${indicator}`);
+            }
+        }
+    }
+    
+    console.log('═══════════════════════════════════════════════════\n');
+}
+
+/**
+ * Carga y cachea solo los últimos 20 chats con datos mínimos
+ */
+async function loadChats() {
+    await refreshChatList();
+    await displayChatList();
 }
 
 /**
@@ -136,23 +241,19 @@ async function showChatHistory(chat) {
     try {
         const messages = await chat.fetchMessages({ limit: state.messageHistoryLimit });
         
-        console.log('--- Historial breve del chat ---');
+        const chatName = getChatName(chat);
+        console.log('\n═══════════════════════════════════════════════════');
+        console.log(`Chat con: ${chatName}`);
+        console.log('═══════════════════════════════════════════════════\n');
         
         // Procesar mensajes en orden inverso sin almacenarlos
-        const chatName = getChatName(chat);
         for (let i = messages.length - 1; i >= 0; i--) {
             const msg = messages[i];
-            const from = msg.fromMe ? 'Yo' : chatName;
-            let content = msg.body || '';
-
-            if (msg.hasMedia) {
-                content = getMediaDescription(msg);
-            }
-
-            console.log(`[${from} - ${formatDate(msg.timestamp)}]: ${content}`);
+            formatMessage(msg, chatName);
         }
         
-        console.log('--- Fin del historial ---\n');
+        // Solo una línea separadora después del historial cargado
+        console.log('───────────────────────────────────────────────────\n');
         
         // Limpiar referencias después de mostrar
         messages.length = 0;
@@ -186,15 +287,28 @@ function chatLoop(chat) {
     
     state.isInChatLoop = true;
     state.currentChatId = chat.id._serialized;
+    state.isInMenu = false; // Establecer a false cuando entras a un chat
+    
+    // Marcar el chat como leído cuando entras
+    const chatId = chat.id._serialized;
+    const metadata = state.chatMetadata.get(chatId);
+    if (metadata) {
+        metadata.unread = false;
+        state.chatMetadata.set(chatId, metadata);
+    }
     
     const promptMessage = () => {
-        rl.question('Escribe tu mensaje (o usa "<", "salir" o ".." para volver al menú): ', async (message) => {
+        rl.question('> ', async (message) => {
+            // Limpiar inmediatamente la línea del prompt que readline mostró
+            readline.moveCursor(process.stdout, 0, -1);
+            readline.clearLine(process.stdout, 0);
+            
             const cleanMessage = message.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
             
             if (['<', 'salir', '..'].includes(cleanMessage)) {
                 state.currentChatId = null;
                 state.isInChatLoop = false;
-                console.log('Volviendo al menú principal...');
+                console.log('\nVolviendo al menú principal...\n');
                 showMenu();
                 return;
             }
@@ -213,7 +327,14 @@ function chatLoop(chat) {
             
             try {
                 await client.sendMessage(chat.id._serialized, message);
-                console.log(`Mensaje enviado a ${getChatName(chat)}: ${message}`);
+                // Mostrar el mensaje enviado con el mismo formato que los recibidos
+                const sentMsg = {
+                    fromMe: true,
+                    body: message,
+                    timestamp: Math.floor(Date.now() / 1000),
+                    hasMedia: false
+                };
+                formatMessage(sentMsg, getChatName(chat));
             } catch (error) {
                 console.error('Error al enviar el mensaje:', error.message);
             }
@@ -229,6 +350,9 @@ function chatLoop(chat) {
  * Muestra el menú principal
  */
 function showMenu() {
+    state.isInMenu = true;
+    state.currentChatId = null;
+    
     const menuText = chalk.blue(
         `\nElige una opción:\n` +
         `1. Listar los últimos 20 chats\n` +
@@ -251,8 +375,6 @@ function showMenu() {
                     const chat = await getChatByIndex(chatIndex);
                     
                     if (chat) {
-                        console.log(chalk.green(`Chat seleccionado: ${getChatName(chat)}`));
-                        await showContactStatus(chat);
                         await showChatHistory(chat);
                         chatLoop(chat);
                     } else {
@@ -305,13 +427,12 @@ client.on('message', async (message) => {
         return;
     }
     
-    // Solo mostrar mensajes si no estamos en modo No Molestar o si no es del chat actual
-    if (state.doNotDisturb && state.currentChatId === message.from) {
-        return;
-    }
+    const chatId = message.from;
+    
+    // Actualizar el chat en la lista automáticamente
+    await updateChatOnNewMessage(chatId);
     
     try {
-        const chatId = message.from;
         const metadata = state.chatMetadata.get(chatId);
         const sender = metadata ? metadata.name : 'Desconocido';
         
@@ -319,7 +440,34 @@ client.on('message', async (message) => {
             ? getMediaDescription(message) 
             : (message.body || '[Mensaje vacío]');
         
-        console.log(`\nMensaje de ${sender}: ${content}`);
+        // Si estamos dentro de un chat, SIEMPRE mostrar mensajes de ese chat
+        if (state.currentChatId === chatId) {
+            // Marcar como leído automáticamente porque lo estamos viendo
+            const currentMetadata = state.chatMetadata.get(chatId);
+            if (currentMetadata) {
+                currentMetadata.unread = false;
+                state.chatMetadata.set(chatId, currentMetadata);
+            }
+            // Pausar readline temporalmente para evitar que el prompt interfiera
+            rl.pause();
+            // Limpiar la línea del prompt: volver al inicio y limpiar hasta el final
+            process.stdout.write('\r\x1b[K');
+            // Mostrar con el mismo formato que el historial (en nueva línea)
+            formatMessage(message, sender);
+            // Reanudar readline (readline mostrará su prompt automáticamente)
+            rl.resume();
+            return;
+        }
+        
+        // Si estamos en el menú y el modo "No Molestar" está activo, no mostrar notificaciones
+        if (state.isInMenu && state.doNotDisturb) {
+            return; // No mostrar notificación, pero la lista ya se actualizó arriba
+        }
+        
+        // Si estamos en el menú y el modo "No Molestar" está desactivado, mostrar notificación
+        if (state.isInMenu && !state.currentChatId) {
+            console.log(chalk.yellow(`\n💬 Nuevo mensaje de ${sender}: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`));
+        }
     } catch (error) {
         // Ignorar errores al procesar mensajes
     }
@@ -334,7 +482,7 @@ client.on('qr', (qr) => {
 client.on('ready', async () => {
     console.log('Cliente está listo!');
     await loadChats();
-    showMenu();
+            showMenu();
 });
 
 client.on('disconnected', (reason) => {
