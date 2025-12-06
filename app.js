@@ -49,17 +49,30 @@ function getChatName(chat) {
 }
 
 /**
- * Formatea la hora de los mensajes con formato inteligente (estilo WhatsApp)
+ * Formatea la fecha completa (para estados de contacto) - Hora de Perú (24 horas)
+ */
+function formatDate(timestamp) {
+    const date = new Date(timestamp * 1000);
+    return `${date.toLocaleDateString('es-PE', { timeZone: 'America/Lima' })} ${date.toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Lima' })}`;
+}
+
+/**
+ * Formatea la hora de los mensajes con formato inteligente (estilo WhatsApp) - Hora de Perú
  */
 function formatTime(timestamp) {
     const msgDate = new Date(timestamp * 1000);
     const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    // Obtener fechas en zona horaria de Perú
+    const msgDatePeru = new Date(msgDate.toLocaleString('en-US', { timeZone: 'America/Lima' }));
+    const nowPeru = new Date(now.toLocaleString('en-US', { timeZone: 'America/Lima' }));
+    
+    const today = new Date(nowPeru.getFullYear(), nowPeru.getMonth(), nowPeru.getDate());
     const yesterday = new Date(today);
     yesterday.setDate(yesterday.getDate() - 1);
-    const msgDay = new Date(msgDate.getFullYear(), msgDate.getMonth(), msgDate.getDate());
+    const msgDay = new Date(msgDatePeru.getFullYear(), msgDatePeru.getMonth(), msgDatePeru.getDate());
     
-    const timeStr = msgDate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+    const timeStr = msgDate.toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Lima' });
     
     // Si es hoy, solo mostrar hora
     if (msgDay.getTime() === today.getTime()) {
@@ -74,17 +87,17 @@ function formatTime(timestamp) {
     // Si es esta semana (últimos 7 días)
     const daysDiff = Math.floor((today - msgDay) / (1000 * 60 * 60 * 24));
     if (daysDiff <= 7) {
-        const dayName = msgDate.toLocaleDateString('es-ES', { weekday: 'short' });
+        const dayName = msgDate.toLocaleDateString('es-PE', { weekday: 'short', timeZone: 'America/Lima' });
         return `${dayName} ${timeStr}`;
     }
     
     // Si es del mismo año, mostrar día/mes
-    if (msgDate.getFullYear() === now.getFullYear()) {
-        return `${msgDate.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' })} ${timeStr}`;
+    if (msgDatePeru.getFullYear() === nowPeru.getFullYear()) {
+        return `${msgDate.toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit', timeZone: 'America/Lima' })} ${timeStr}`;
     }
     
     // Si es de otro año, mostrar día/mes/año
-    return `${msgDate.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${timeStr}`;
+    return `${msgDate.toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Lima' })} ${timeStr}`;
 }
 
 /**
@@ -133,7 +146,7 @@ async function updateChatOnNewMessage(chatId) {
         const updatedChat = chats.find(c => c.id._serialized === chatId);
         
         if (!updatedChat) return;
-        
+
         // Actualizar metadata
         const existingMetadata = state.chatMetadata.get(chatId);
         state.chatMetadata.set(chatId, {
@@ -246,8 +259,8 @@ async function showChatHistory(chat) {
         console.log(`Chat con: ${chatName}`);
         console.log('═══════════════════════════════════════════════════\n');
         
-        // Procesar mensajes en orden inverso sin almacenarlos
-        for (let i = messages.length - 1; i >= 0; i--) {
+        // Procesar mensajes en orden cronológico: más antiguos arriba, más recientes abajo
+        for (let i = 0; i < messages.length; i++) {
             const msg = messages[i];
             formatMessage(msg, chatName);
         }
@@ -278,6 +291,55 @@ async function showContactStatus(chat) {
 }
 
 /**
+ * Muestra información completa del contacto
+ */
+async function showContactInfo(chat) {
+    const chatName = getChatName(chat);
+    console.log('\n═══════════════════════════════════════════════════');
+    console.log('Información del contacto:');
+    console.log(`  Nombre: ${chatName}`);
+    console.log(`  ID: ${chat.id.user || 'N/A'}`);
+    
+    try {
+        const presence = await chat.getPresence();
+        const status = presence.isOnline 
+            ? 'En línea' 
+            : `Visto por última vez: ${presence.lastSeen ? formatDate(presence.lastSeen) : 'desconocido'}`;
+        console.log(`  Estado: ${status}`);
+    } catch (error) {
+        console.log('  Estado: No disponible');
+    }
+    
+    try {
+        const unreadCount = await chat.getUnreadCount();
+        if (unreadCount > 0) {
+            console.log(`  Mensajes no leídos: ${unreadCount}`);
+        }
+    } catch (error) {
+        // Ignorar errores
+    }
+    
+    console.log('═══════════════════════════════════════════════════\n');
+}
+
+/**
+ * Muestra la ayuda de comandos disponibles
+ */
+function showHelp() {
+    console.log('\n═══════════════════════════════════════════════════');
+    console.log('Comandos disponibles:');
+    console.log('  /ayuda, /help        - Mostrar esta ayuda');
+    console.log('  /historial N, /hist N - Ver últimos N mensajes (ej: /historial 50)');
+    console.log('  /limpiar, /clear     - Limpiar pantalla');
+    console.log('  /info                 - Información del contacto');
+    console.log('  /mas                  - Cargar 20 mensajes más');
+    console.log('  /salir, /exit, /menu - Volver al menú principal');
+    console.log('\nAtajos rápidos:');
+    console.log('  <, salir, ..         - Volver al menú principal');
+    console.log('═══════════════════════════════════════════════════\n');
+}
+
+/**
  * Bucle principal para enviar mensajes en un chat
  */
 function chatLoop(chat) {
@@ -303,7 +365,77 @@ function chatLoop(chat) {
             readline.moveCursor(process.stdout, 0, -1);
             readline.clearLine(process.stdout, 0);
             
-            const cleanMessage = message.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+            const input = message.trim();
+            
+            if (!input) {
+                promptMessage();
+                return;
+            }
+            
+            // Manejar comandos que empiezan con /
+            if (input.startsWith('/')) {
+                const [command, ...args] = input.slice(1).toLowerCase().split(' ');
+                const arg = args.join(' ');
+                
+                switch (command) {
+                    case 'ayuda':
+                    case 'help':
+                        showHelp();
+                        promptMessage();
+                        return;
+                    
+                    case 'historial':
+                    case 'hist':
+                        const limit = parseInt(arg) || 20;
+                        if (limit > 0 && limit <= 100) {
+                            state.messageHistoryLimit = limit;
+                            await showChatHistory(chat);
+                        } else {
+                            console.log('El límite debe estar entre 1 y 100.');
+                        }
+                        promptMessage();
+                        return;
+                    
+                    case 'limpiar':
+                    case 'clear':
+                        console.clear();
+                        // Mostrar el encabezado del chat nuevamente
+                        const chatName = getChatName(chat);
+                        console.log('\n═══════════════════════════════════════════════════');
+                        console.log(`Chat con: ${chatName}`);
+                        console.log('═══════════════════════════════════════════════════\n');
+                        promptMessage();
+                        return;
+                    
+                    case 'info':
+                        await showContactInfo(chat);
+                        promptMessage();
+                        return;
+                    
+                    case 'mas':
+                        state.messageHistoryLimit += 20;
+                        await showChatHistory(chat);
+                        promptMessage();
+                        return;
+                    
+                    case 'salir':
+                    case 'exit':
+                    case 'menu':
+                        state.currentChatId = null;
+                        state.isInChatLoop = false;
+                        console.log('\nVolviendo al menú principal...\n');
+                        showMenu();
+                        return;
+                    
+                    default:
+                        console.log(`Comando desconocido: /${command}. Usa /ayuda para ver comandos disponibles.`);
+                        promptMessage();
+                        return;
+                }
+            }
+            
+            // Manejar atajos rápidos (mantener compatibilidad)
+            const cleanMessage = input.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
             
             if (['<', 'salir', '..'].includes(cleanMessage)) {
                 state.currentChatId = null;
@@ -320,17 +452,13 @@ function chatLoop(chat) {
                 return;
             }
             
-            if (!message.trim()) {
-                promptMessage();
-                return;
-            }
-            
+            // Es un mensaje normal, enviarlo
             try {
-                await client.sendMessage(chat.id._serialized, message);
+                await client.sendMessage(chat.id._serialized, input);
                 // Mostrar el mensaje enviado con el mismo formato que los recibidos
                 const sentMsg = {
                     fromMe: true,
-                    body: message,
+                    body: input,
                     timestamp: Math.floor(Date.now() / 1000),
                     hasMedia: false
                 };
