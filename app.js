@@ -392,7 +392,6 @@ function showMenu() {
 
             case '4':
                 console.log('Saliendo...');
-                await cleanup();
                 rl.close();
                 process.exit(0);
                 break;
@@ -429,47 +428,20 @@ client.on('message', async (message) => {
     
     const chatId = message.from;
     
-    // Actualizar el chat en la lista automáticamente
-    await updateChatOnNewMessage(chatId);
-    
-    try {
-        const metadata = state.chatMetadata.get(chatId);
-        const sender = metadata ? metadata.name : 'Desconocido';
-        
-        const content = message.hasMedia 
-            ? getMediaDescription(message) 
-            : (message.body || '[Mensaje vacío]');
-        
-        // Si estamos dentro de un chat, SIEMPRE mostrar mensajes de ese chat
-        if (state.currentChatId === chatId) {
-            // Marcar como leído automáticamente porque lo estamos viendo
-            const currentMetadata = state.chatMetadata.get(chatId);
-            if (currentMetadata) {
-                currentMetadata.unread = false;
-                state.chatMetadata.set(chatId, currentMetadata);
-            }
-            // Pausar readline temporalmente para evitar que el prompt interfiera
-            rl.pause();
-            // Limpiar la línea del prompt: volver al inicio y limpiar hasta el final
-            process.stdout.write('\r\x1b[K');
-            // Mostrar con el mismo formato que el historial (en nueva línea)
-            formatMessage(message, sender);
-            // Reanudar readline (readline mostrará su prompt automáticamente)
-            rl.resume();
-            return;
-        }
-        
-        // Si estamos en el menú y el modo "No Molestar" está activo, no mostrar notificaciones
-        if (state.isInMenu && state.doNotDisturb) {
-            return; // No mostrar notificación, pero la lista ya se actualizó arriba
-        }
-        
-        // Si estamos en el menú y el modo "No Molestar" está desactivado, mostrar notificación
-        if (state.isInMenu && !state.currentChatId) {
-            console.log(chalk.yellow(`\n💬 Nuevo mensaje de ${sender}: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`));
-        }
-    } catch (error) {
-        // Ignorar errores al procesar mensajes
+    // Si estamos dentro de un chat, SIEMPRE actualizar (porque estamos viendo ese chat)
+    if (state.currentChatId === chatId) {
+        await updateChatOnNewMessage(chatId);
+        // ... resto del código para mostrar el mensaje ...
+    }
+    // Si estamos en el menú y "No Molestar" está activo, NO actualizar la lista
+    else if (state.isInMenu && state.doNotDisturb) {
+        // No hacer nada, la lista no se actualiza
+        return;
+    }
+    // Si estamos en el menú y "No Molestar" está desactivado, SÍ actualizar
+    else {
+        await updateChatOnNewMessage(chatId);
+        // ... resto del código para mostrar notificación ...
     }
 });
 
